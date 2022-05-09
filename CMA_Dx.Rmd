@@ -1,0 +1,540 @@
+---
+title: "CMA_Dx"
+output: html_document
+author: Wenjia Cao
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T)
+library(dplyr)
+library(ontologyIndex)
+library(reshape2)
+library(ggplot2)
+library(readxl)
+library(eeptools)
+library(readr)
+#rm(list = ls())
+```
+
+
+```{r readin}
+
+get_hpo_terms <- function(proband_id) {
+  terms = hpo_dat$Term[hpo_dat$Phenotips_ID == proband_id]
+  
+  return(terms)
+  # return(paste(terms, collapse = "; "))
+}
+
+# Define paths to all files:
+output_path <- '/MolecularDx_Regression/CMA_dx/'
+
+probands_file <- '/MolecularDx_Regression/datasets/first_1000_probands_new.txt'
+moldx_file <- "/MolecularDx_Regression/datasets/mol_dx_info.csv" 
+no_moldx_file <- '/MolecularDx_Regression/datasets/no_mol_dx_info.csv'  
+
+
+
+cma_dx_file <- '/MolecularDx_Regression/datasets/cma_dx.csv'
+multiple_dx_file <- '/MolecularDx_Regression/datasets/multiple_dx.csv'
+x_linked_file <- '/MolecularDx_Regression/datasets/x_linked_males.csv'
+
+ancestry_file <- '/MolecularDx_Regression/datasets/1k_probands.ethinicity_pcs.xlsx'
+latest_hpo_export <- '/MolecularDx_Regression/datasets/hpo_by_patients_2021_05_31.csv'
+hpo_obo_file <- '/MolecularDx_Regression/datasets/hp.obo'
+
+inbreeding_file <- "MolecularDx_Regression/datasets/aggregated_inbreeding_June2021.csv"
+AOH_file = read_csv("MolecularDx_Regression/datasets/new_AOH.csv")
+hpo <- get_ontology('/MolecularDx_Regression/datasets/hp.obo',
+                    propagate_relationships = "is_a", extract_tags = "minimal")
+
+# Read in first 1000 probands
+probands <- read.csv(probands_file, header = FALSE, sep = ",")
+probands <- probands$V1
+
+# Read in BSI information from both cohorts
+moldx <- read.csv(moldx_file, header = TRUE, sep = ",")
+no_moldx <- read.csv(no_moldx_file, header = TRUE, sep = ",")
+
+# Read in IDs for subcohorts
+cma_dx <- read.csv(cma_dx_file, header = FALSE, sep = ",")
+multiple_dx <- read.csv(multiple_dx_file, header = FALSE, sep = ",")
+x_linked <- read.csv(x_linked_file, header = FALSE, sep = ",")
+
+# Read in PCA Ancestry information
+ancestry <- read_excel(ancestry_file)
+ancestry <- ancestry[,c('sample_id', 'ancestry-prediction')]
+names(ancestry) <- c('Phenotips_ID', 'Ancestry')
+
+moldx <- merge(moldx, ancestry, by = 'Phenotips_ID')
+no_moldx <- merge(no_moldx, ancestry, by = 'Phenotips_ID')
+
+# Read in inbreeding dataset
+inbreeding <- read_csv(inbreeding_file)
+inbreeding <-inbreeding[,c('Phenotips_ID',"KBAVG")]
+
+#Parse AOH
+AOH = AOH_file[,c('0',"1")]
+names(AOH) = c('Phenotips_ID',"AOH_Mb")
+
+############################### Count number of Phenotypic Abnormalities########################################
+
+hpo_file <- read.csv(latest_hpo_export, sep = ",", header = TRUE)
+names(hpo_file) <- c("Term", "Phenotips_ID", "Family_ID")
+hpo_file <- hpo_file[, c('Phenotips_ID', 'Term')]
+hpo_file <- hpo_file[hpo_file$Phenotips_ID %in% probands,]
+hpo_file <- hpo_file[!duplicated(hpo_file), ]
+
+
+pheno_abnorms <- melt(data.frame(hpo$children[['HP:0000118']], hpo$name[hpo$children[['HP:0000118']]]))
+names(pheno_abnorms) <- c('HPO_ID', 'HPO_Term')
+
+# stores which abnormalities a patient has
+abnorms_present <- data.frame(matrix(ncol = length(pheno_abnorms$HPO_ID), nrow = length(probands)), row.names = probands)
+names(abnorms_present) <- pheno_abnorms$HPO_ID
+abnorms_present[is.na(abnorms_present)] <- FALSE
+
+for (i in 1:nrow(hpo_file)) {
+  term <- hpo_file[i, 'Term']
+  term_id <- hpo$id[hpo$name == term]
+  patient <-hpo_file[i, 'Phenotips_ID']
+  
+  if (length(term_id) > 0) {
+    
+    
+    matching_abnorms <- pheno_abnorms$HPO_ID[pheno_abnorms$HPO_ID == term_id]
+    
+    
+    
+    if (length(matching_abnorms) > 0) {
+      abnorms_present[patient, matching_abnorms] <- TRUE
+    } else {
+      term_ancestors <- hpo$ancestors[hpo$id == term_id]
+      parent_terms <-pheno_abnorms$HPO_ID[pheno_abnorms$HPO_ID %in% term_ancestors[[1]]]
+      
+      
+      
+      if (length(parent_terms) > 0) {
+        abnorms_present[patient, parent_terms]=  TRUE
+      }
+      
+    }
+    
+  }
+}
+
+# Count how many abnormalities each proband has
+abnorm_counts <- rowSums(abnorms_present)
+abnorm_table <- data.frame(table(abnorm_counts))
+names(abnorm_table) <- c('Num_Phenotypic_Abnormalities', 'Patient_Count')
+abnorm_table['Percent'] <- abnorm_table$Patient_Count/(sum(abnorm_table$Patient_Count))*100
+
+high_level_hpo <- as.data.frame(abnorm_counts)
+high_level_hpo <- cbind(Phenotips_ID = rownames(high_level_hpo), high_level_hpo)
+rownames(high_level_hpo) <- 1:nrow(high_level_hpo)
+names(high_level_hpo) <- c('Phenotips_ID', 'HPO_Count')
+
+
+abnorms_present <- cbind(Phenotips_ID = rownames(abnorms_present), abnorms_present)
+rownames(abnorms_present) <- NULL
+
+abnorms_present_moldx <- abnorms_present[abnorms_present$Phenotips_ID %in% moldx$Phenotips_ID, ]
+abnorms_present_moldx <- subset(abnorms_present_moldx, select = -c(Phenotips_ID))
+abnorms_present_no_moldx <- abnorms_present[abnorms_present$Phenotips_ID %in% no_moldx$Phenotips_ID, ]
+abnorms_present_no_moldx <- subset(abnorms_present_no_moldx, select = -c(Phenotips_ID))
+
+hpo_counts_moldx <- as.data.frame(sapply(abnorms_present_moldx, sum))
+hpo_counts_moldx <- cbind(HPO_ID = rownames(hpo_counts_moldx), hpo_counts_moldx)
+hpo_counts_moldx['Molecular_Dx'] <- 'Yes'
+rownames(hpo_counts_moldx) <- NULL
+names(hpo_counts_moldx) <- c('HPO_ID', 'Count', 'Molecular_Dx')
+hpo_counts_moldx['Percent'] <- hpo_counts_moldx$Count / length(moldx$Phenotips_ID) * 100
+
+hpo_counts_no_moldx <- as.data.frame(sapply(abnorms_present_no_moldx, sum))
+hpo_counts_no_moldx <- cbind(HPO_ID = rownames(hpo_counts_no_moldx), hpo_counts_no_moldx)
+hpo_counts_no_moldx['Molecular_Dx'] <- 'No'
+rownames(hpo_counts_no_moldx) <- NULL
+names(hpo_counts_no_moldx) <- c('HPO_ID', 'Count', 'Molecular_Dx')
+hpo_counts_no_moldx['Percent'] <- hpo_counts_no_moldx$Count / length(no_moldx$Phenotips_ID) * -100
+
+hpo_counts_combined <- rbind(hpo_counts_moldx, hpo_counts_no_moldx)
+hpo_counts_combined <- merge(hpo_counts_combined, pheno_abnorms, by = 'HPO_ID')
+hpo_counts_combined <- subset(hpo_counts_combined, select = -c(HPO_ID, Count))
+
+#########################################################################################################################
+
+moldx <- merge(moldx, high_level_hpo, by = 'Phenotips_ID')
+no_moldx <- merge(no_moldx, high_level_hpo, by = 'Phenotips_ID')
+
+
+# make tables for logistic regression
+combined <- rbind(moldx, no_moldx)
+combined$Race <- factor(combined$Race)
+combined = merge(combined,AOH,by='Phenotips_ID')
+#add inbreeding
+moldx=merge(moldx,AOH,by='Phenotips_ID')
+no_moldx=merge(no_moldx,AOH,by='Phenotips_ID')
+
+
+no_xlinked <- combined[!(combined$Phenotips_ID %in% x_linked$V1),]
+no_xlinked <- no_xlinked[, c('Molecular_Dx', 'Sex', 'Age', 'Ancestry', 'HPO_Count',"AOH_Mb")]
+
+no_multdx <- combined[!(combined$Phenotips_ID %in% multiple_dx$V1),]
+no_multdx <- no_multdx[, c('Molecular_Dx', 'Sex', 'Age', 'Ancestry', 'HPO_Count',"AOH_Mb")]
+
+no_cmadx <- combined[!(combined$Phenotips_ID %in% cma_dx$V1),]
+no_cmadx <- no_cmadx[, c('Molecular_Dx', 'Sex', 'Age', 'Ancestry', 'HPO_Count',"AOH_Mb")]
+
+cma_regression_tab <- combined
+cma_regression_tab['CMA_Dx'] <- 0
+cma_regression_tab$CMA_Dx[cma_regression_tab$Phenotips_ID %in% cma_dx$V1] <- 1
+cma_regression_tab <- cma_regression_tab[, c('CMA_Dx', 'Sex', 'Age', 'Ancestry', 'HPO_Count',"AOH_Mb")]
+
+combined <- combined[, c('Molecular_Dx', 'Sex', 'Age', 'Ancestry', 'HPO_Count',"AOH_Mb")]
+
+
+```
+
+
+```{r suv}
+SUV <- read.csv('/MolecularDx_Regression/datasets/VUS_complete_sheet.csv', header = TRUE, sep = ",")
+
+names(SUV) <- c('Phenotips_ID', 'Sex','Age','vus','sampleID','Ancestry')
+print(paste0("Median age with SUV: ",sprintf("%.1f", median(SUV$Age[SUV$vus == 1]))))
+print(paste0("Median age without SUV: ",sprintf("%.1f", median(SUV$Age[SUV$vus == 0]))))
+
+log_reg <- glm(formula = vus ~ Sex + Age + Ancestry+ Age:Sex,
+               family = 'binomial',
+               data = SUV)
+print(log_reg)
+print(summary(log_reg))
+print(exp(coef(log_reg)))
+print(exp(confint(log_reg)))
+print('')
+print('')
+
+```
+
+
+
+```{r logistic}
+
+
+
+print('----------------------------- Regular Logistic Regression -----------------------------')
+print(paste0("Median age with Mol Dx: ",sprintf("%.1f", median(combined$Age[combined$Molecular_Dx == 1]))))
+print(paste0("Median age without Mol Dx: ",sprintf("%.1f", median(combined$Age[combined$Molecular_Dx == 0]))))
+
+log_reg <- glm(formula = Molecular_Dx ~ Sex + Age + Ancestry + HPO_Count +AOH_Mb+ Age:Sex,
+               family = 'binomial',
+               data = combined)
+print(log_reg)
+print(summary(log_reg))
+print(exp(coef(log_reg)))
+print(exp(confint(log_reg)))
+print('')
+print('')
+print('----------------------------- Removed X-Linked Males -----------------------------')
+print(paste0("Median age with Mol Dx: ",sprintf("%.1f",median(no_xlinked$Age[no_xlinked$Molecular_Dx == 1]))))
+print(paste0("Median age without Mol Dx: ",sprintf("%.1f",median(no_xlinked$Age[no_xlinked$Molecular_Dx == 0]))))
+
+log_reg_no_xlinked <- glm(formula = Molecular_Dx ~ Sex + Age + Ancestry + HPO_Count+ AOH_Mb + Age:Sex,
+                          family = 'binomial',
+                          data = no_xlinked)
+print(log_reg_no_xlinked)
+print(summary(log_reg_no_xlinked))
+print(exp(coef(log_reg_no_xlinked)))
+print(exp(confint(log_reg_no_xlinked)))
+print('')
+print('')
+print('----------------------------- Removed Multiple Dx -----------------------------')
+print(paste0("Median age with Mol Dx: ",sprintf("%.1f",median(no_multdx$Age[no_multdx$Molecular_Dx == 1]))))
+print(paste0("Median age without Mol Dx: ",sprintf("%.1f",median(no_multdx$Age[no_multdx$Molecular_Dx == 0]))))
+
+log_reg_no_multdx <- glm(formula = Molecular_Dx ~ Sex + Age + Ancestry + HPO_Count +AOH_Mb+ Age:Sex,
+                         family = 'binomial',
+                         data = no_multdx)
+print(log_reg_no_multdx)
+print(summary(log_reg_no_multdx))
+print(exp(coef(log_reg_no_multdx)))
+
+print('')
+print('')
+print('----------------------------- Removed CMA Dx -----------------------------')
+print(paste0("Median age with Mol Dx: ",sprintf("%.1f",median(no_cmadx$Age[no_cmadx$Molecular_Dx == 1]))))
+print(paste0("Median age without Mol Dx: ",sprintf("%.1f",median(no_cmadx$Age[no_cmadx$Molecular_Dx == 0]))))
+
+log_reg_no_cmadx <- glm(formula = CMA_Dx ~ Sex + Age + Ancestry + HPO_Count +AOH_Mb+ Age:Sex,
+                         family = 'binomial',
+                         data = no_cmadx)
+print(log_reg_no_cmadx)
+print(summary(log_reg_no_cmadx))
+print(exp(coef(log_reg_no_cmadx)))
+
+print('')
+print('')
+
+```
+
+
+
+```{r plots}
+
+
+########## Plot age distribution for all cohorts ############
+combined_age <- combined[,c('Molecular_Dx', 'Age')]
+combined_age['Cohort'] <- 'All'
+
+xlinked_age <- no_xlinked[,c('Molecular_Dx', 'Age')]
+xlinked_age['Cohort'] <- 'No X-linked Males'
+
+cma_age <- no_cmadx[,c('Molecular_Dx', 'Age')]
+cma_age['Cohort'] <- 'No CMA Dx'
+
+mult_age <- no_multdx[,c('Molecular_Dx', 'Age')]
+mult_age['Cohort'] <- 'No Multiple Dx'
+
+age_df <- rbind(combined_age, xlinked_age)
+age_df <- rbind(age_df, cma_age)
+age_df <- rbind(age_df, mult_age)
+age_df$Molecular_Dx[age_df$Molecular_Dx == 1] <- 'Yes'
+age_df$Molecular_Dx[age_df$Molecular_Dx == 0] <- 'No'
+
+png(paste0(output_path, "age_comparison.png"), 
+    width = 1000, height = 700, units = 'px', res = 300)
+age_plot <- 
+  ggplot(data = age_df, aes(x = Cohort, y = Age)) +
+  geom_boxplot(aes(fill = Molecular_Dx), lwd = 0.1, outlier.size = 0.1) +
+  scale_fill_manual(values=c("#99e699", "#ffaa80")) +
+  ggtitle('Age distribution in each subcohort') + 
+  theme(
+    title = element_text(size = 6),
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 4),
+    axis.text = element_text(size = 4),
+    axis.title = element_text(size = 5)
+  )
+print(age_plot)
+dev.off()
+
+print(ggplot_build(age_plot)$data)
+
+########## Plot sex for all cohorts ############
+combined_sex <- combined[,c('Molecular_Dx', 'Sex')]
+combined_sex <- as.data.frame(prop.table(table(combined_sex), 1))
+combined_sex['Cohort'] <- 'All'
+combined_sex['Order'] <- 1
+
+xlinked_sex <- no_xlinked[,c('Molecular_Dx', 'Sex')]
+xlinked_sex <- as.data.frame(prop.table(table(xlinked_sex), 1))
+xlinked_sex['Cohort'] <- 'No X-linked Males'
+xlinked_sex['Order'] <- 2
+
+cma_sex <- no_cmadx[,c('Molecular_Dx', 'Sex')]
+cma_sex <- as.data.frame(prop.table(table(cma_sex), 1))
+cma_sex['Cohort'] <- 'No CMA Dx'
+cma_sex['Order'] <- 3
+
+mult_sex <- no_multdx[,c('Molecular_Dx', 'Sex')]
+mult_sex <- as.data.frame(prop.table(table(mult_sex), 1))
+mult_sex['Cohort'] <- 'No Multiple Dx'
+mult_sex['Order'] <- 4
+
+sex_df <- rbind(combined_sex, xlinked_sex)
+sex_df <- rbind(sex_df, cma_sex)
+sex_df <- rbind(sex_df, mult_sex)
+sex_df['Freq'] <- sex_df['Freq'] * 100
+sex_df[sex_df['Sex'] == 'M', 'Freq'] = sex_df[sex_df['Sex'] == 'M', 'Freq'] * -1
+sex_df$Molecular_Dx <- as.character(sex_df$Molecular_Dx)
+sex_df$Molecular_Dx[sex_df$Molecular_Dx == '1'] <- 'Yes'
+sex_df$Molecular_Dx[sex_df$Molecular_Dx == '0'] <- 'No'
+
+png(paste0(output_path, "sex_comparison.png"), 
+    width = 1000, height = 700, units = 'px', res = 300)
+print(
+  ggplot(data = sex_df, aes(x = reorder(interaction(Cohort, Molecular_Dx), -Order), y = Freq, fill = Sex, label = round(abs(Freq), digits = 1))) +
+    geom_bar(stat = "identity", lwd = 0.1, width = 0.5) +
+    ggtitle('Percent M/F in each subcohort (Molecular Dx Yes/No)') + 
+    geom_text(size = 1, position = position_stack(vjust = 0.5)) + 
+    xlab('Cohort.Molecular_Dx') + 
+    ylab('Percent') + 
+    theme(
+      title = element_text(size = 6),
+      legend.title = element_text(size = 5),
+      legend.text = element_text(size = 4),
+      axis.text = element_text(size = 4),
+      axis.title = element_text(size = 5),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank()
+    ) +
+    coord_flip()
+)
+dev.off()
+
+######### HPO Boxplot ############
+combined_hpo_count <- combined[,c('Molecular_Dx', 'HPO_Count')]
+combined_hpo_count['Cohort'] <- 'All'
+
+xlinked_hpo_count <- no_xlinked[,c('Molecular_Dx', 'HPO_Count')]
+xlinked_hpo_count['Cohort'] <- 'No X-linked Males'
+
+cma_hpo_count <- no_cmadx[,c('Molecular_Dx', 'HPO_Count')]
+cma_hpo_count['Cohort'] <- 'No CMA Dx'
+
+mult_hpo_count <- no_multdx[,c('Molecular_Dx', 'HPO_Count')]
+mult_hpo_count['Cohort'] <- 'No Multiple Dx'
+
+hpo_count_df <- rbind(combined_hpo_count, xlinked_hpo_count)
+hpo_count_df <- rbind(hpo_count_df, cma_hpo_count)
+hpo_count_df <- rbind(hpo_count_df, mult_hpo_count)
+hpo_count_df$Molecular_Dx[hpo_count_df$Molecular_Dx == 1] <- 'Yes'
+hpo_count_df$Molecular_Dx[hpo_count_df$Molecular_Dx == 0] <- 'No'
+
+png(paste0(output_path, "hpo_comparison.png"), 
+    width = 1000, height = 700, units = 'px', res = 300)
+hpo_count_plot <- 
+  ggplot(data = hpo_count_df, aes(x = Cohort, y = HPO_Count)) +
+  geom_boxplot(aes(fill = Molecular_Dx), lwd = 0.1, outlier.size = 0.1) +
+  scale_fill_manual(values=c("#99e699", "#ffaa80")) +
+  ggtitle('High Level HPO count distribution in each subcohort') + 
+  theme(
+    title = element_text(size = 6),
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 4),
+    axis.text = element_text(size = 4),
+    axis.title = element_text(size = 5)
+  )
+print(hpo_count_plot)
+dev.off()
+
+print(ggplot_build(hpo_count_plot)$data)
+
+###### Plot Counts of HPO in by Mol Dx ###########
+
+png(paste0(output_path, "hpo_term_comparison.png"), 
+    width = 1000, height = 700, units = 'px', res = 300)
+print(
+  ggplot(data = hpo_counts_combined, aes(x = HPO_Term, y = Percent, fill = Molecular_Dx, label = round(abs(Percent), digits = 1))) +
+    geom_bar(stat = "identity", lwd = 0.1, width = 0.5) +
+    ggtitle('Percent with Phenotypic Abnormalities') + 
+    scale_fill_manual(values=c("#99e699", "#ffaa80")) +
+    xlab('Phenotypic Abnormality') + 
+    ylab('Percent of patients') + 
+    theme(
+      title = element_text(size = 6),
+      legend.title = element_text(size = 5),
+      legend.text = element_text(size = 4),
+      axis.text = element_text(size = 4),
+      axis.title = element_text(size = 5),
+      legend.key.size = unit(0.3,'cm')
+    ) +
+    coord_flip()
+)
+dev.off()
+
+
+
+######### Inbreed Boxplot ############
+combined_inbreed <- combined[,c('Molecular_Dx', 'AOH_Mb')]
+combined_inbreed['Cohort'] <- 'All'
+
+xlinked_inbreed <- no_xlinked[,c('Molecular_Dx', 'AOH_Mb')]
+xlinked_inbreed['Cohort'] <- 'No X-linked Males'
+
+cma_inbreed <- no_cmadx[,c('Molecular_Dx', 'AOH_Mb')]
+cma_inbreed['Cohort'] <- 'No CMA Dx'
+
+mult_inbreed <- no_multdx[,c('Molecular_Dx', 'AOH_Mb')]
+mult_inbreed['Cohort'] <- 'No Multiple Dx'
+
+inbreed_df <- rbind(combined_inbreed, xlinked_inbreed)
+inbreed_df <- rbind(inbreed_df, cma_inbreed)
+inbreed_df <- rbind(inbreed_df, mult_inbreed)
+inbreed_df$Molecular_Dx[inbreed_df$Molecular_Dx == 1] <- 'Yes'
+inbreed_df$Molecular_Dx[inbreed_df$Molecular_Dx == 0] <- 'No'
+
+png(paste0(output_path, "inbreeding_comparison.png"), 
+    width = 1000, height = 700, units = 'px', res = 300)
+KBAVG_plot <- 
+  ggplot(data = inbreed_df, aes(x = Cohort, y = AOH)) +
+  geom_boxplot(aes(fill = Molecular_Dx), lwd = 0.1, outlier.size = 0.1) +
+  scale_fill_manual(values=c("#99e699", "#ffaa80")) +
+  ggtitle('Inbreed/KBAVG distribution in each subcohort') + 
+  theme(
+    title = element_text(size = 6),
+    legend.title = element_text(size = 5),
+    legend.text = element_text(size = 4),
+    axis.text = element_text(size = 4),
+    axis.title = element_text(size = 5)
+  )
+print(KBAVG_plot)
+dev.off()
+
+print(ggplot_build(KBAVG_plot)$data)
+
+
+
+
+```
+
+
+```{r plotAOH}
+
+########## Plot sex for all cohorts ############
+combined_sex <- combined[,c('Molecular_Dx', 'AOH_Mb')]
+combined_sex <- as.data.frame(prop.table(table(combined_sex), 1))
+combined_sex['Cohort'] <- 'All'
+combined_sex['Order'] <- 1
+
+xlinked_sex <- no_xlinked[,c('Molecular_Dx', 'AOH_Mb')]
+xlinked_sex <- as.data.frame(prop.table(table(xlinked_sex), 1))
+xlinked_sex['Cohort'] <- 'No X-linked Males'
+xlinked_sex['Order'] <- 2
+
+cma_sex <- no_cmadx[,c('Molecular_Dx', 'AOH_Mb')]
+cma_sex <- as.data.frame(prop.table(table(cma_sex), 1))
+cma_sex['Cohort'] <- 'No CMA Dx'
+cma_sex['Order'] <- 3
+
+mult_sex <- no_multdx[,c('Molecular_Dx', 'AOH_Mb')]
+mult_sex <- as.data.frame(prop.table(table(mult_sex), 1))
+mult_sex['Cohort'] <- 'No Multiple Dx'
+mult_sex['Order'] <- 4
+
+sex_df <- rbind(combined_sex, xlinked_sex)
+sex_df <- rbind(sex_df, cma_sex)
+sex_df <- rbind(sex_df, mult_sex)
+sex_df['Freq'] <- sex_df['Freq'] * 100
+
+sex_df[sex_df['AOH_Mb'] == 0, 'Freq'] = sex_df[sex_df['AOH_Mb'] == 0, 'Freq'] * -1
+sex_df$Molecular_Dx <- as.character(sex_df$Molecular_Dx)
+sex_df$Molecular_Dx[sex_df$Molecular_Dx == '1'] <- 'Yes'
+sex_df$Molecular_Dx[sex_df$Molecular_Dx == '0'] <- 'No'
+
+png(paste0(output_path, "aoh_comparison.png"), 
+    width = 1000, height = 700, units = 'px', res = 300)
+print(
+  ggplot(data = sex_df, aes(x = reorder(interaction(Cohort, Molecular_Dx), -Order), y = Freq, fill = AOH_Mb, label = round(abs(Freq), digits = 1))) +
+    geom_bar(stat = "identity", lwd = 0.1, width = 0.5) +
+    ggtitle('Percent AOH(0/1) in each subcohort (Molecular Dx Yes/No)') + 
+    geom_text(size = 1, position = position_stack(vjust = 0.5)) + 
+    xlab('Cohort.Molecular_Dx') + 
+    ylab('Percent') + 
+    theme(
+      title = element_text(size = 6),
+      legend.title = element_text(size = 5),
+      legend.text = element_text(size = 4),
+      axis.text = element_text(size = 4),
+      axis.title = element_text(size = 5),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank()
+    ) +
+    coord_flip()
+)
+dev.off()
+```
+
+
+
+
+
